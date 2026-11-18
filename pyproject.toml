@@ -20,10 +20,11 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "scipy>=1.17.1",
     "seaborn>=0.13.2",
+    "sentencepiece>=0.2.3",
     "statsmodels>=0.15.0",
     "streamlit>=1.67.0",
     "torch>=2.15.0",
-    "transformers>=4.48",
+    "transformers>=5.0",
     "yfinance>=1.8.0",
 ]
 
