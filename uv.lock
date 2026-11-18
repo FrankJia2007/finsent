@@ -1063,7 +1063,7 @@ requires-dist = [
     { name = "statsmodels", specifier = ">=0.15.0" },
     { name = "streamlit", specifier = ">=1.67.0" },
     { name = "torch", specifier = ">=2.15.0" },
-    { name = "transformers", specifier = ">=4.48" },
+    { name = "transformers", specifier = ">=5.0" },
     { name = "yfinance", specifier = ">=1.8.0" },
 ]
 

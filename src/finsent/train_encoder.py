@@ -16,11 +16,13 @@ import torch
 import torch.nn as nn
 from datasets import Dataset
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
 from transformers import (AutoConfig, AutoModelForSequenceClassification,
                           AutoTokenizer, DataCollatorWithPadding, Trainer,
                           TrainingArguments, set_seed)
 
 from finsent.data import ID2LABEL, LABEL2ID, MODELS_DIR, OUTPUTS_DIR, PROCESSED_DIR
+from finsent.evaluate import summarize
 
 
 def compute_metrics(eval_pred):
@@ -72,6 +74,9 @@ def main():
     p.add_argument("--test_file", default=str(PROCESSED_DIR / "test.parquet"))
     # help 里的 % 必须写成 %%：argparse 会对 help 字符串做 % 格式化
     p.add_argument("--only_allagree", action="store_true", help="只用 100%% 一致的句子训练")
+    # Finding 1 的等量对照：从 50agree train 里分层抽 1569 行（= allagree train 的大小）
+    p.add_argument("--subsample", type=int, default=None,
+                   help="训练集分层抽样到 N 行（按 label 分层，用 --seed 抽）；val/test 不动")
     p.add_argument("--epochs", type=int, default=4)
     p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--batch_size", type=int, default=32)
@@ -90,6 +95,14 @@ def main():
     test = pd.read_parquet(Path(args.test_file).resolve())
     if args.only_allagree:
         train, val = train[train.all_agree], val[val.all_agree]
+    if args.subsample is not None:
+        if not 0 < args.subsample < len(train):
+            raise ValueError(f"--subsample 必须在 (0, {len(train)}) 之间，收到 {args.subsample}")
+        # 分层抽样保持 neg/neu/pos 比例不变，否则对照实验混进了「类别分布变了」这个变量
+        train, _ = train_test_split(train, train_size=args.subsample,
+                                    stratify=train["label"], random_state=args.seed)
+        print(f"[info] subsample: train → {len(train)} rows, "
+              f"label 分布 {train['label'].value_counts(normalize=True).sort_index().round(3).tolist()}")
 
     # ---- 1. Tokenize ----
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -117,6 +130,8 @@ def main():
         data_tag = "50agree"
     else:
         data_tag = train_path.parent.name
+    if args.subsample is not None:
+        data_tag += f"-n{args.subsample}"          # 例如 50agree-n1569，和完整 50agree 区分开
     run_name = f"{args.model.split('/')[-1]}_{data_tag}_s{args.seed}"
     training_args = TrainingArguments(
         output_dir=str(OUTPUTS_DIR / "runs" / run_name),
@@ -147,6 +162,9 @@ def main():
         compute_metrics=compute_metrics,
     )
     trainer.train()
+    # checkpoint rotation 会删掉非 best 的 checkpoint，连同里面的 log；
+    # save_state() 把完整的 log_history（每个 epoch 的 val 分数）写到 run 目录的 trainer_state.json
+    trainer.save_state()
 
     # ---- 4. 在测试集上预测，保存概率（后面做 benchmark 和错误分析都要用）----
     logits = trainer.predict(ds_test).predictions
@@ -162,6 +180,11 @@ def main():
     out_path = preds_dir / f"{run_name}.parquet"
     out.to_parquet(out_path, index=False)
     print(f"Saved predictions to {out_path}")
+
+    # ---- 5. 用统一的 summarize() 在两个测试集上报分（和 Phase 2 同一把尺子）----
+    # 这里只打印，方便当场对照 TF-IDF 的 0.750；benchmark 汇总以 preds/*.parquet 为准
+    for test_tag, df in [("allagree", out[out["all_agree"]]), ("50agree", out)]:
+        summarize(df["label"], df["pred"], name=f"{run_name} | test={test_tag}")
 
     if args.save_model:
         trainer.save_model(str(MODELS_DIR / run_name))   # tokenizer 会一起保存

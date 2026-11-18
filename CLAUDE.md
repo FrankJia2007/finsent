@@ -23,7 +23,7 @@ Primary metric: **macro-F1**, not accuracy. See §6 — neutral is 59.4% of the 
 - [x] **Phase 0** Environment + GitHub repo
 - [x] **Phase 1** Leakage-free split + EDA
 - [x] **Phase 2** `evaluate.py` + majority/TF-IDF baselines (findings in §6)
-- [ ] **Phase 3** Fine-tune encoders ← **current position**. `train_encoder.py` is written and reviewed but has not been run yet
+- [ ] **Phase 3** Fine-tune encoders ← **current position**. `train_encoder.py` runs end to end; first ModernBERT run passes acceptance (§6). Next: the 18-run grid
 - [ ] Phase 4 LLM zero/few-shot · Phase 5 benchmark aggregation + error analysis
 - [ ] Phase 6 gold set / domain shift · Phase 7 distillation
 - [ ] Phase 8 daily pipeline + dashboard · Phase 9 signal analysis · Phase 10 README/résumé
@@ -58,7 +58,7 @@ Still to be written: `llm_classify.py` (P4), `news.py` (P6), `market.py` + `pipe
 
 Python 3.11 + uv. **The installed stack is one major version ahead of what the tutorial assumes**: `transformers 5.23`, `torch 2.15`, `numpy 2.4`, `pandas 3.1`, `datasets 5.2`. Verified that `eval_strategy` and `processing_class` still exist in transformers v5.
 
-This machine is a Mac — **MPS available, no CUDA**. Good for baselines and for checking that a script runs end to end; the 18 Phase 3 training runs go to Colab.
+This machine is a Mac — **MPS available, no CUDA**. A full ModernBERT-base run (50agree, 4 epochs, fp32) took **~5 min** on MPS, so the 18-run Phase 3 grid is likely feasible locally; Colab is the fallback (time one DeBERTa-v3 run before deciding).
 
 ```bash
 uv run python -m finsent.data              # rebuild splits (deterministic, seed=42)
@@ -105,6 +105,17 @@ On Colab, **do not let pip reinstall torch** — the `torch>=2.15` requirement w
 2. **Errors are about whether a signal exists, not about its direction.** Of the best model's 155 errors, positive↔neutral accounts for 66% and negative↔positive only 13%. This mirrors the disagreement pattern among the human annotators → a real share of the remaining error is task-intrinsic ambiguity, not model capacity. **For Phase 3, watch positive/negative recall (currently 0.696 / 0.692), not overall accuracy.**
 3. **No shortcut learning.** Not a single company name appears among the top-weighted TF-IDF features; `min_df=2` filtered them out, since most occur once. The strongest neutral features are `is / approximately / includes / no / be / other` — purely descriptive words, **and all of them are in the NLTK English stopword list**. That is the empirical case for deliberately not removing stopwords.
 
+**Phase 3 first result — single seed, preliminary** (ModernBERT-base, train=50agree, seed 42, lr 2e-5, 4 epochs; best checkpoint = epoch 2, val macro-F1 0.843):
+
+| Model | Train set | test=allagree | test=50agree |
+|---|---|---|---|
+| ModernBERT-base s42 | 50agree | **0.949** [.916, .979] | **0.839** [.807, .867] |
+
+- Clears the acceptance bar: on test=50agree the CI lower bound (0.807) sits above TF-IDF's upper bound (0.785).
+- Positive/negative recall 0.779 / 0.835 (TF-IDF: 0.696 / 0.692).
+- Errors 155 → 104; positive↔neutral 69%, negative↔positive 7% → Finding 2 holds even more strongly: the model almost never flips direction.
+- Grid seeds are {1, 2, 3}; this s42 run stays as an extra reference point, not part of the 3-seed mean.
+
 ## 7. Known pitfalls
 
 - **FinBERT (`ProsusAI/finbert`) has two independent problems**:
@@ -120,9 +131,9 @@ On Colab, **do not let pip reinstall torch** — the `torch>=2.15` requirement w
 
 1. ~~Fix relative paths~~ done and verified
 2. ~~Raise the `transformers` floor to `>=5.0`~~ done
-3. Run ModernBERT once locally to confirm the script completes, then move to Colab ← **next**
-4. On Colab, run 3 models × 3 seeds × 2 train sets = 18 runs; pull `outputs/preds/*.parquet` back locally
-5. Consider adding `--subsample N` to run the equal-size control for finding 1 in §6
+3. ~~Run ModernBERT once locally~~ done: completes in ~5 min on MPS, passes acceptance (§6). `train_encoder.py` now also prints `summarize()` on both test sets and calls `trainer.save_state()`, so `outputs/runs/<run>/trainer_state.json` keeps the full per-epoch val curve (checkpoint rotation otherwise deletes it)
+4. Run 3 models × seeds {1, 2, 3} × 2 train sets = 18 runs (locally if DeBERTa timing allows, else Colab) ← **next**
+5. ~~Add `--subsample N`~~ done (stratified by label, drawn with `--seed`; run tag becomes e.g. `50agree-n1569`). Still to run: the equal-size control for finding 1 in §6, `--subsample 1569` × 3 seeds
 6. Consider one FinBERT zero-shot run to quantify the contamination
 7. Acceptance: the best model should clearly beat TF-IDF's **0.750** on `test=50agree`. **If it comes in lower, it is a bug in the training code 99% of the time** — label mapping, learning rate, or padding — not a limitation of BERT
 
