@@ -41,12 +41,15 @@ finsent/
 │   ├── gold/                 # Phase 6 hand-labeled real headlines (empty)
 │   ├── silver/               # Phase 7 LLM silver labels (empty)
 │   └── live/                 # Phase 8 daily scrapes (empty)
-├── notebooks/01_eda.ipynb    # Phase 1 EDA
+├── notebooks/
+│   ├── 01_eda.ipynb          # Phase 1 EDA
+│   └── 02_colab_grid.ipynb   # Phase 3 grid on Colab: clone → install → Drive-linked outputs → run_grid → sanity check → zip
 ├── src/finsent/
 │   ├── data.py               # path constants + download/parse/split PhraseBank
 │   ├── evaluate.py           # macro_f1 / bootstrap_ci / summarize — shared by every model
 │   ├── baselines.py          # Phase 2: DummyClassifier + TF-IDF/LR
-│   └── train_encoder.py      # Phase 3: HF Trainer fine-tuning
+│   ├── train_encoder.py      # Phase 3: HF Trainer fine-tuning (one run)
+│   └── run_grid.py           # Phase 3: runs the model × seed × train-set grid, resumable
 ├── app/                      # Phase 8 Streamlit (empty)
 ├── outputs/                  # results_*.csv, preds/, runs/ (gitignored)
 └── models/                   # saved weights (gitignored)
@@ -58,7 +61,7 @@ Still to be written: `llm_classify.py` (P4), `news.py` (P6), `market.py` + `pipe
 
 Python 3.11 + uv. **The installed stack is one major version ahead of what the tutorial assumes**: `transformers 5.23`, `torch 2.15`, `numpy 2.4`, `pandas 3.1`, `datasets 5.2`. Verified that `eval_strategy` and `processing_class` still exist in transformers v5.
 
-This machine is a Mac — **MPS available, no CUDA**. A full ModernBERT-base run (50agree, 4 epochs, fp32) took **~5 min** on MPS, so the 18-run Phase 3 grid is likely feasible locally; Colab is the fallback (time one DeBERTa-v3 run before deciding).
+This machine is a Mac (M5, **16 GB unified memory**) — **MPS available, no CUDA**. A full ModernBERT-base run (50agree, 4 epochs, fp32) took ~5 min on MPS, but DeBERTa-v3-base in fp32 **thrashed memory** (swap 8.8/9.2 GB, steps went from 1.15 it/s to 13–34 s/it, ETA 2–3 h) and was stopped. → Local is fine for smoke tests and single ModernBERT/FinBERT runs; **the grid goes to Colab**, all models on one platform so precision (fp32 on MPS vs mixed precision on CUDA) is not a confound between models.
 
 ```bash
 uv run python -m finsent.data              # rebuild splits (deterministic, seed=42)
@@ -66,7 +69,7 @@ uv run python -m finsent.baselines         # runnable from any directory
 uv run python -m finsent.train_encoder --model answerdotai/ModernBERT-base --seed 1
 ```
 
-On Colab, **do not let pip reinstall torch** — the `torch>=2.15` requirement will clobber Colab's CUDA build:
+Colab workflow lives in `notebooks/02_colab_grid.ipynb` (open from GitHub; the repo is public). `outputs/preds` and `outputs/logs` are symlinked to `MyDrive/finsent_outputs/` so a disconnect loses nothing — rerun all cells and `run_grid` resumes. On Colab, **do not let pip reinstall torch** — the `torch>=2.15` requirement will clobber Colab's CUDA build:
 
 ```python
 !pip install -e . --no-deps -q
@@ -125,6 +128,7 @@ On Colab, **do not let pip reinstall torch** — the `torch>=2.15` requirement w
 - Renamed transformers arguments: `evaluation_strategy` → `eval_strategy`, `tokenizer=` → `processing_class=`.
 - In `train_encoder.py`, `use_bf16` / `use_fp16` are both gated on `torch.cuda.is_available()` → both False on Mac, so training runs in full fp32. Works, just slow.
 - DeBERTa-v3's tokenizer needs `sentencepiece` (installed).
+- **transformers v5 loads weights in the checkpoint's stored dtype** (`dtype="auto"` is the default). `microsoft/deberta-v3-base` is stored in **fp16**, so it loaded as a pure-fp16 model and AdamW updated fp16 weights with no master copy or loss scaling: first logged loss 1217, then NaN, val loss NaN every epoch, every prediction = class 0 (argmax of NaN), macro-F1 0.07. ModernBERT and FinBERT are stored in fp32 and were unaffected. Fixed by `dtype=torch.float32` in `build_model()`. Caught via the all-one-column confusion matrix from `summarize()` and the NaN val curve from `save_state()`. **Before `run_grid.py` re-runs anything, delete broken `outputs/preds/<run>.parquet` files** — it skips any run whose preds already exist.
 - Remote is `git@github.com:FrankJia2007/finsent.git` (the username's capitalization changed; the old lowercase URL still works but warns on every push).
 
 ## 8. Phase 3 to-do
@@ -132,7 +136,7 @@ On Colab, **do not let pip reinstall torch** — the `torch>=2.15` requirement w
 1. ~~Fix relative paths~~ done and verified
 2. ~~Raise the `transformers` floor to `>=5.0`~~ done
 3. ~~Run ModernBERT once locally~~ done: completes in ~5 min on MPS, passes acceptance (§6). `train_encoder.py` now also prints `summarize()` on both test sets and calls `trainer.save_state()`, so `outputs/runs/<run>/trainer_state.json` keeps the full per-epoch val curve (checkpoint rotation otherwise deletes it)
-4. Run 3 models × seeds {1, 2, 3} × 2 train sets = 18 runs (locally if DeBERTa timing allows, else Colab) ← **next**
+4. Run the grid on Colab via `python -m finsent.run_grid --with_control` (3 models × seeds {1, 2, 3} × {50agree, allagree, 50agree-n1569} = 27 runs; resumable, one subprocess per run, logs in `outputs/logs/`); pull `outputs/preds/*.parquet` back locally ← **next**
 5. ~~Add `--subsample N`~~ done (stratified by label, drawn with `--seed`; run tag becomes e.g. `50agree-n1569`). Still to run: the equal-size control for finding 1 in §6, `--subsample 1569` × 3 seeds
 6. Consider one FinBERT zero-shot run to quantify the contamination
 7. Acceptance: the best model should clearly beat TF-IDF's **0.750** on `test=50agree`. **If it comes in lower, it is a bug in the training code 99% of the time** — label mapping, learning rate, or padding — not a limitation of BERT

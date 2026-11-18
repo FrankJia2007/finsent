@@ -43,9 +43,13 @@ def build_model(model_name: str):
     所以这里显式检测并重置，保证三个模型都从「预训练 body + 随机 head」出发，
     比较的是 body 的质量，而不是让 FinBERT 带着一个已在本任务训练过的头抢跑。
     """
+    # dtype=float32 必须显式写：transformers v5 默认 dtype="auto"，按 checkpoint 存储精度加载。
+    # microsoft/deberta-v3-base 存的是 fp16 → 整个模型变成纯 fp16，AdamW 直接更新 fp16 权重、
+    # 没有 master weights 也没有 loss scaling → 第一步 loss 1217，之后全 NaN，预测全是 class 0。
+    # 训练永远从 fp32 权重出发；CUDA 上的 bf16/fp16 由 Trainer 的 autocast 负责（mixed precision）。
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name, num_labels=3, id2label=ID2LABEL, label2id=LABEL2ID,
-        ignore_mismatched_sizes=True,
+        ignore_mismatched_sizes=True, dtype=torch.float32,
     )
     cfg = AutoConfig.from_pretrained(model_name)
     orig_labels = {int(k): str(v).lower() for k, v in (cfg.id2label or {}).items()}
