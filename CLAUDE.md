@@ -24,8 +24,9 @@ Primary metric: **macro-F1**, not accuracy. See §6 — neutral is 59.4% of the 
 - [x] **Phase 1** Leakage-free split + EDA
 - [x] **Phase 2** `evaluate.py` + majority/TF-IDF baselines (findings in §6)
 - [x] **Phase 3** Fine-tune encoders — 27-run Colab grid + FinBERT zero-shot, analyzed in §6
-- [ ] **Phase 4** LLM zero/few-shot ← **current position** · Phase 5 benchmark aggregation + error analysis (`paired_bootstrap()` already in `evaluate.py`)
-- [ ] Phase 6 gold set / domain shift · Phase 7 distillation
+- [x] **Phase 4** LLM zero/few-shot — Haiku 5.5 (zero/few-shot, effort low/medium) + Opus 5.5 zero-shot, flip-rate tests, analyzed in §6
+- [ ] **Phase 5** benchmark aggregation + error analysis ← **current position** (`paired_bootstrap()` and the clean/ambiguous split already done; remaining: final table + manual review of sentences every model misses)
+- [ ] Phase 6 gold set / domain shift (also decides the Phase 7 teacher, §6) · Phase 7 distillation
 - [ ] Phase 8 daily pipeline + dashboard · Phase 9 signal analysis · Phase 10 README/résumé
 
 ## 3. Layout
@@ -50,13 +51,14 @@ finsent/
 │   ├── baselines.py          # Phase 2: DummyClassifier + TF-IDF/LR
 │   ├── train_encoder.py      # Phase 3: HF Trainer fine-tuning (one run)
 │   ├── run_grid.py           # Phase 3: runs the model × seed × train-set grid, resumable
-│   └── zero_shot.py          # Phase 3: inference with an already-trained classifier (FinBERT contamination check)
+│   ├── zero_shot.py          # Phase 3: inference with an already-trained classifier (FinBERT contamination check)
+│   └── llm_classify.py       # Phase 4: Claude classification (structured outputs, prompt-versioned cache, runner, flip test)
 ├── app/                      # Phase 8 Streamlit (empty)
 ├── outputs/                  # results_*.csv, preds/, runs/ (gitignored)
 └── models/                   # saved weights (gitignored)
 ```
 
-Still to be written: `llm_classify.py` (P4), `news.py` (P6), `market.py` + `pipeline.py` (P8), `.github/workflows/daily.yml` (P8).
+Still to be written: `news.py` (P6), `market.py` + `pipeline.py` (P8), `.github/workflows/daily.yml` (P8).
 
 ## 4. Environment and commands
 
@@ -68,7 +70,12 @@ This machine is a Mac (M5, **16 GB unified memory**) — **MPS available, no CUD
 uv run python -m finsent.data              # rebuild splits (deterministic, seed=42)
 uv run python -m finsent.baselines         # runnable from any directory
 uv run python -m finsent.train_encoder --model answerdotai/ModernBERT-base --seed 1
+uv run python -m finsent.llm_classify --limit 5                          # LLM smoke test: prints preds + cost estimate, writes nothing
+uv run python -m finsent.llm_classify --model claude-opus-5-5           # full test set → outputs/preds/opus-5-5_zeroshot-low_s0.parquet
+uv run python -m finsent.llm_classify --model claude-haiku-5-5 --flip_test 100   # sampling-noise check
 ```
+
+**Claude API**: needs `ANTHROPIC_API_KEY` in `.env` — a Claude Pro subscription does **not** include API credit (separate prepaid billing in the Console). Every LLM result is cached in `outputs/llm_cache.jsonl` keyed by prompt version + model + few_shot + effort + replicate + sentence, so reruns are free and resumable. Phase 4 total spend ≈ $2.5 (Haiku runs ~$0.05 each, Opus run $2.05, flip tests $0.29).
 
 Colab workflow lives in `notebooks/02_colab_grid.ipynb` (open from GitHub; the repo is public). `outputs/preds` and `outputs/logs` are symlinked to `MyDrive/finsent_outputs/` so a disconnect loses nothing — rerun all cells and `run_grid` resumes. On Colab, **do not let pip reinstall torch** — the `torch>=2.15` requirement will clobber Colab's CUDA build:
 
@@ -145,6 +152,36 @@ Colab workflow lives in `notebooks/02_colab_grid.ipynb` (open from GitHub; the r
 - **Data size is a separate, larger effect**: n1569 → full 50agree adds +0.070 on test=50agree for ModernBERT (+0.011 for FinBERT, which already knows the task). Caveat: more data also means more steps (200 → 424), and n1569 ModernBERT was still improving at epoch 4, so part of this "size" effect is under-training.
 - Open caveat: ambiguous labels are annotator majority votes, so the gain may be learning *annotator convention* rather than financial semantics. Phase 6 (new headlines, new annotator) tests whether it transfers.
 
+**Phase 4 benchmark — LLMs, no training data** (Claude via `llm_classify.py`, structured outputs, effort `low` unless noted, single run each; failures would count as errors — there were 0):
+
+| Model | test=allagree | test=50agree | clean (347) | ambiguous (379) | neg / neu / pos recall | cost / 726 |
+|---|---|---|---|---|---|---|
+| **Opus 5.5 zero-shot** | 0.953 | **0.865** [.840, .890] | 0.953 | **0.791** | 0.934 / 0.856 / **0.848** | $2.05 |
+| Haiku 5.5 zero-shot | 0.963 | 0.844 [.813, .872] | 0.963 | 0.739 | 0.923 / 0.916 / 0.676 | $0.052 |
+| Haiku 5.5 few-shot | 0.963 | 0.840 | 0.963 | 0.733 | 0.934 / 0.912 / 0.667 | $0.064 |
+| Haiku 5.5 zero-shot, effort medium | 0.959 | 0.835 | — | — | 0.890 / 0.910 / 0.681 | $0.055 |
+| *ref: DeBERTa-ft (3 seeds)* | 0.952 | 0.866 | 0.952 | 0.794 | 0.930 / 0.902 / 0.806 | — |
+
+Paired bootstrap (A − B):
+
+| Comparison | test=50agree | clean | ambiguous |
+|---|---|---|---|
+| Opus − DeBERTa | −0.001 [−0.028, +0.026] | +0.001 | −0.003 |
+| Opus − Haiku | +0.022 [−0.005, +0.049] | −0.010 | **+0.051 [+0.005, +0.097]** |
+| Haiku-zs − DeBERTa | −0.023 [−0.052, +0.006] | +0.011 | **−0.055 [−0.099, −0.007]** |
+| Haiku-fs − Haiku-zs | −0.004 [−0.023, +0.015] | −0.000 | −0.006 |
+| Haiku medium − low | −0.009 [−0.025, +0.006] | −0.004 | −0.013 |
+
+- **Opus zero-shot ties fine-tuned DeBERTa on every slice** (all |Δ| ≤ 0.003): a general LLM with zero training data matches the best clean fine-tuned encoder.
+- **Haiku's gap is model size, not "LLMs can't learn the convention"**: Haiku trails DeBERTa only on the ambiguous half (−0.055, sig.); Opus closes that gap entirely. On the clean half Haiku is the top scorer of all (0.963, n.s.).
+- **Mechanism — a threshold bias, not a comprehension gap.** On the ambiguous half, Haiku predicts positive for **21%** of sentences (true 33%; errors pos→neu 64 vs neu→pos 19); Opus predicts **35%** (errors 31 vs 39, balanced). Neither model ever confuses negative with positive. 98 of Haiku's 109 errors are on the ambiguous half. Opus and Haiku disagree on 98 sentences, 84% ambiguous.
+- **Neither few-shot nor more thinking moves Haiku's threshold**: few-shot −0.004, effort medium −0.009 (both n.s.); positive share on ambiguous stays 21–22%. The 3 few-shot examples are clear-cut cases, while all of Haiku's errors are borderline ones. Output is ~19–28 tokens/sentence, i.e. almost no thinking even at medium. A prompt that states the convention (e.g. "reported growth in sales/profit counts as positive") might fix it — **if tried, tune on val, never on test**.
+- **Sampling noise is negligible** (temperature can no longer be set): `--flip_test 100` flipped **2/100 (Haiku), 1/100 (Opus)**, all on ambiguous sentences with low confidence (flipped mean conf 0.75 / 0.50 vs 0.83 stable). Far below the ±0.03 CI → no self-consistency voting needed for benchmarking.
+- **Verbalized confidence is informative**: ECE 0.055 (Opus) / 0.042 (Haiku). Opus accuracy rises monotonically with confidence (0.55 → 0.79 → 0.90 → 0.98 → 1.00 across bins <.7 / .7–.8 / .8–.9 / .9–.95 / ≥.95); Haiku is non-monotonic at the low end (0.72 at <.7 but 0.67 at .7–.8). Both are ~99% accurate at confidence ≥ 0.9 → usable as a silver-label filter or sample weight in Phase 7. The pre-run worry that few-shot examples fixed at 0.9 would collapse confidence did not happen (21% exactly 0.9 vs 16% zero-shot).
+- **Pre-registered rule and what happened**: before running, the rule was "Haiku few-shot ≈ DeBERTa (n.s.) → skip Opus; clearly lower → run Opus zero-shot". Result: −0.026 [−0.054, **+0.000**] — exactly on the boundary (and significant on the ambiguous half). Opus was run anyway because the rule's purpose (separate "small model" from "LLMs as a family") was unresolved; this added a result, it did not change any Haiku number.
+- **Caveat — contamination applies to LLMs too**: PhraseBank has been public since 2014; Opus matching the annotator convention on ambiguous sentences may partly be memorization, which larger models do more of. Not testable on PhraseBank — Phase 6 again.
+- **Phase 7 teacher: deferred to Phase 6.** Opus = best quality (≈$56 per 20k headlines), Haiku = 40× cheaper (≈$1.4) but would pass its positive-undercall bias to the student. "Best" depends on which labeling convention is wanted, and the Phase 6 gold set defines that — run both LLMs on the gold set (Opus < $1 per 300 headlines) and choose then.
+
 ## 7. Known pitfalls
 
 - **FinBERT (`ProsusAI/finbert`) has two independent problems**:
@@ -156,9 +193,13 @@ Colab workflow lives in `notebooks/02_colab_grid.ipynb` (open from GitHub; the r
 - In `train_encoder.py`, `use_bf16` / `use_fp16` are both gated on `torch.cuda.is_available()` → both False on Mac, so training runs in full fp32. Works, just slow.
 - DeBERTa-v3's tokenizer needs `sentencepiece` (installed).
 - **transformers v5 loads weights in the checkpoint's stored dtype** (`dtype="auto"` is the default). `microsoft/deberta-v3-base` is stored in **fp16**, so it loaded as a pure-fp16 model and AdamW updated fp16 weights with no master copy or loss scaling: first logged loss 1217, then NaN, val loss NaN every epoch, every prediction = class 0 (argmax of NaN), macro-F1 0.07. ModernBERT and FinBERT are stored in fp32 and were unaffected. Fixed by `dtype=torch.float32` in `build_model()`. Caught via the all-one-column confusion matrix from `summarize()` and the NaN val curve from `save_state()`. **Before `run_grid.py` re-runs anything, delete broken `outputs/preds/<run>.parquet` files** — it skips any run whose preds already exist.
+- **Claude API changes vs the tutorial** (all fixed in `llm_classify.py`): (1) `temperature` returns a 400 with SDK 2.x (new API version) — sampling can't be controlled, so measure it with `--flip_test`; (2) current models think by default, so `content[0]` may be a thinking block — find the `text` block, check `stop_reason`, and keep `max_tokens` well above the answer length; (3) use structured outputs (`output_config.format` JSON schema with an `enum` label) rather than regex-parsing JSON; (4) never fall back to a default class on failure — neutral is the majority class, so failures would hide as plausible errors; failures are `pred=-1` and score as wrong; (5) the cache key must include the prompt (`PROMPT_VERSION` hash), or editing the prompt silently returns stale answers; (6) `claude-haiku-4-5` from the tutorial is the previous generation and 10× the price of `claude-haiku-5-5`.
+- **Server-side `fallbacks` deliberately left off** for Opus 5.5 benchmark runs: a refused request would be answered by a different model but scored under Opus's name. Refusals show up as parse failures instead (0 so far). Reconsider for the Phase 8 production pipeline.
 - Remote is `git@github.com:FrankJia2007/finsent.git` (the username's capitalization changed; the old lowercase URL still works but warns on every push).
 
-## 8. Phase 3 to-do
+## 8. To-do
+
+**Phase 3** (done)
 
 1. ~~Fix relative paths~~ done and verified
 2. ~~Raise the `transformers` floor to `>=5.0`~~ done
@@ -168,6 +209,13 @@ Colab workflow lives in `notebooks/02_colab_grid.ipynb` (open from GitHub; the r
 6. ~~FinBERT zero-shot~~ done: `python -m finsent.zero_shot` → `outputs/preds/finbert_zeroshot_s0.parquet` (§6)
 7. ~~Acceptance~~ passed by all three encoders (§6): the best model should clearly beat TF-IDF's **0.750** on `test=50agree`. **If it comes in lower, it is a bug in the training code 99% of the time** — label mapping, learning rate, or padding — not a limitation of BERT
 8. ~~Degenerate DeBERTa small-data runs~~ **decided: report as-is (option b)**. `deberta-v3-base_50agree-n1569_s2/s3` hit the majority-class plateau (§7); that cell rests on s1 alone and is flagged in §6. Rationale: the equal-size conclusion already holds with 3 seeds each for ModernBERT and FinBERT (significant), and DeBERTa s1 agrees in direction with the largest effect — a rerun would complete the table, not change the conclusion. Revisit before Phase 7: rerun **both** small-data configs for **all three** models with more epochs (e.g. 10), since small-data stability matters for distillation
+
+**Phase 4** (done): `llm_classify.py` fixed (§7) and extended with a runner and `--flip_test`; Haiku zero/few-shot, Haiku effort medium, Opus zero-shot, flip tests on both — results in §6.
+
+**Next**
+1. Phase 5: one final benchmark table over every model in `outputs/preds/` (summarize + paired bootstrap vs DeBERTa), and a manual read of the sentences that **every** model gets wrong — are they label noise, or genuinely hard?
+2. Phase 6: collect 2026 headlines, hand-label a gold set, run every model on it (domain shift + contamination check for FinBERT and the LLMs), then **choose the Phase 7 teacher** (Haiku vs Opus) by agreement with the gold labels
+3. Optional: a convention-explicit prompt for Haiku, tuned on **val** only, to see if its positive-undercall bias is fixable cheaply
 
 ## 9. Companion notes
 
