@@ -15,14 +15,19 @@ def macro_f1(y_true, y_pred) -> float:
 
 
 def bootstrap_ci(y_true, y_pred, metric=macro_f1, n_boot=1000, seed=0):
-    """有放回地重采样测试集，返回指标的 95% 置信区间 (low, high)。"""
+    """有放回地重采样测试集，返回指标的 95% 置信区间 (low, high)。
+
+    y_pred 可以是一个预测数组，也可以是多个 seed 的预测数组列表：每次重采样对各 seed 的 metric
+    取平均 → 得到「seed 平均分」的 CI（和 paired_bootstrap 的多 seed 处理方式一致）。
+    """
     rng = np.random.default_rng(seed)
-    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    y_true = np.asarray(y_true)
+    preds = [np.asarray(p) for p in y_pred] if isinstance(y_pred, (list, tuple)) else [np.asarray(y_pred)]
     n = len(y_true)
     scores = []
     for _ in range(n_boot):
         idx = rng.integers(0, n, n)          # 抽 n 个下标，可重复
-        scores.append(metric(y_true[idx], y_pred[idx]))
+        scores.append(np.mean([metric(y_true[idx], p[idx]) for p in preds]))
     return tuple(np.percentile(scores, [2.5, 97.5]))
 
 

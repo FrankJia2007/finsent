@@ -48,11 +48,12 @@ finsent/
 ├── src/finsent/
 │   ├── data.py               # path constants + download/parse/split PhraseBank
 │   ├── evaluate.py           # macro_f1 / bootstrap_ci / paired_bootstrap / summarize — shared by every model
-│   ├── baselines.py          # Phase 2: DummyClassifier + TF-IDF/LR
+│   ├── baselines.py          # Phase 2: DummyClassifier + TF-IDF/LR (also writes preds, for paired bootstrap)
 │   ├── train_encoder.py      # Phase 3: HF Trainer fine-tuning (one run)
 │   ├── run_grid.py           # Phase 3: runs the model × seed × train-set grid, resumable
 │   ├── zero_shot.py          # Phase 3: inference with an already-trained classifier (FinBERT contamination check)
-│   └── llm_classify.py       # Phase 4: Claude classification (structured outputs, prompt-versioned cache, runner, flip test)
+│   ├── llm_classify.py       # Phase 4: Claude classification (structured outputs, prompt-versioned cache, runner, flip test)
+│   └── collection.py         # Phase 5: every preds file → one benchmark table (CI + paired Δ vs reference) → outputs/results_benchmark.csv
 ├── app/                      # Phase 8 Streamlit (empty)
 ├── outputs/                  # results_*.csv, preds/, runs/ (gitignored)
 └── models/                   # saved weights (gitignored)
@@ -73,6 +74,7 @@ uv run python -m finsent.train_encoder --model answerdotai/ModernBERT-base --see
 uv run python -m finsent.llm_classify --limit 5                          # LLM smoke test: prints preds + cost estimate, writes nothing
 uv run python -m finsent.llm_classify --model claude-opus-5-5           # full test set → outputs/preds/opus-5-5_zeroshot-low_s0.parquet
 uv run python -m finsent.llm_classify --model claude-haiku-5-5 --flip_test 100   # sampling-noise check
+uv run python -m finsent.collection         # final benchmark table, ~1.5 min (1000 bootstrap resamples per CI/Δ; --n_boot 200 for a quick look)
 ```
 
 **Claude API**: needs `ANTHROPIC_API_KEY` in `.env` — a Claude Pro subscription does **not** include API credit (separate prepaid billing in the Console). Every LLM result is cached in `outputs/llm_cache.jsonl` keyed by prompt version + model + few_shot + effort + replicate + sentence, so reruns are free and resumable. Phase 4 total spend ≈ $2.5 (Haiku runs ~$0.05 each, Opus run $2.05, flip tests $0.29).
@@ -213,7 +215,7 @@ Paired bootstrap (A − B):
 **Phase 4** (done): `llm_classify.py` fixed (§7) and extended with a runner and `--flip_test`; Haiku zero/few-shot, Haiku effort medium, Opus zero-shot, flip tests on both — results in §6.
 
 **Next**
-1. Phase 5: one final benchmark table over every model in `outputs/preds/` (summarize + paired bootstrap vs DeBERTa), and a manual read of the sentences that **every** model gets wrong — are they label noise, or genuinely hard?
+1. Phase 5: ~~one final benchmark table~~ done — `collection.py` (excludes s42 and flip-test replicates, excludes degenerate runs by default with a note, bootstrap CI of the seed-averaged score, paired Δ vs `deberta-v3-base_50agree` on test=50agree and the ambiguous half; every number matches §6). Remaining: a manual read of the sentences that **every** model gets wrong — are they label noise, or genuinely hard?
 2. Phase 6: collect 2026 headlines, hand-label a gold set, run every model on it (domain shift + contamination check for FinBERT and the LLMs), then **choose the Phase 7 teacher** (Haiku vs Opus) by agreement with the gold labels
 3. Optional: a convention-explicit prompt for Haiku, tuned on **val** only, to see if its positive-undercall bias is fixable cheaply
 

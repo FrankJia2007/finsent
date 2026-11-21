@@ -28,6 +28,17 @@ for train_subset in ["allagree", "50agree"]:
     ).fit(tr["sentence"], tr["label"])
 
     for model_name, model in [("majority", dummy), ("tfidf_lr", tfidf_lr)]:
+        # 写出 preds（和 encoder / LLM 同格式），这样 baseline 也能参与 paired bootstrap。
+        # 文件名里 model 用连字符（tfidf-lr）：collection.py 按第一个「_」切分 model 和训练集
+        run = f"{model_name.replace('_', '-')}_{train_subset}_s0"
+        out = test[["sentence", "label", "all_agree"]].copy()
+        out["pred"] = model.predict(test["sentence"])
+        if hasattr(model, "predict_proba"):
+            out[["p_neg", "p_neu", "p_pos"]] = model.predict_proba(test["sentence"])
+        out["model"], out["seed"] = run.rsplit("_s", 1)[0], 0
+        (OUTPUTS_DIR / "preds").mkdir(parents=True, exist_ok=True)
+        out.to_parquet(OUTPUTS_DIR / "preds" / f"{run}.parquet", index=False)
+
         # 每个模型在两个测试集上都评估：简单的 AllAgree 子集 + 完整的 50Agree
         for test_subset, te in [("allagree", test[test.all_agree]), ("50agree", test)]:
             row = summarize(te["label"], model.predict(te["sentence"]),
