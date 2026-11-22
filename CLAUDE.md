@@ -25,8 +25,8 @@ Primary metric: **macro-F1**, not accuracy. See §6 — neutral is 59.4% of the 
 - [x] **Phase 2** `evaluate.py` + majority/TF-IDF baselines (findings in §6)
 - [x] **Phase 3** Fine-tune encoders — 27-run Colab grid + FinBERT zero-shot, analyzed in §6
 - [x] **Phase 4** LLM zero/few-shot — Haiku 5.5 (zero/few-shot, effort low/medium) + Opus 5.5 zero-shot, flip-rate tests, analyzed in §6
-- [ ] **Phase 5** benchmark aggregation + error analysis ← **current position** (`paired_bootstrap()` and the clean/ambiguous split already done; remaining: final table + manual review of sentences every model misses)
-- [ ] Phase 6 gold set / domain shift (also decides the Phase 7 teacher, §6) · Phase 7 distillation
+- [x] **Phase 5** benchmark aggregation + error analysis — `collection.py` final table, `error_analysis.py` (errors vs annotator agreement, hard core), findings in §6
+- [ ] **Phase 6** gold set / domain shift ← **current position** — guidelines written (`data/gold/GUIDELINES.md`), labeling not started; also decides the Phase 7 teacher (§6) · Phase 7 distillation
 - [ ] Phase 8 daily pipeline + dashboard · Phase 9 signal analysis · Phase 10 README/résumé
 
 ## 3. Layout
@@ -39,7 +39,7 @@ finsent/
 ├── data/
 │   ├── raw/                  # PhraseBank zip + extracted txt (gitignored, re-downloadable)
 │   ├── processed/            # train/val/test.parquet — committed on purpose, see §5
-│   ├── gold/                 # Phase 6 hand-labeled real headlines (empty)
+│   ├── gold/                 # Phase 6: GUIDELINES.md (annotation rules, written before labeling); gold.csv to come
 │   ├── silver/               # Phase 7 LLM silver labels (empty)
 │   └── live/                 # Phase 8 daily scrapes (empty)
 ├── notebooks/
@@ -53,7 +53,8 @@ finsent/
 │   ├── run_grid.py           # Phase 3: runs the model × seed × train-set grid, resumable
 │   ├── zero_shot.py          # Phase 3: inference with an already-trained classifier (FinBERT contamination check)
 │   ├── llm_classify.py       # Phase 4: Claude classification (structured outputs, prompt-versioned cache, runner, flip test)
-│   └── collection.py         # Phase 5: every preds file → one benchmark table (CI + paired Δ vs reference) → outputs/results_benchmark.csv
+│   ├── collection.py         # Phase 5: every preds file → one benchmark table (CI + paired Δ vs reference) → outputs/results_benchmark.csv
+│   └── error_analysis.py     # Phase 5: error rate vs annotator agreement level, hard core → outputs/error_hard_core.csv
 ├── app/                      # Phase 8 Streamlit (empty)
 ├── outputs/                  # results_*.csv, preds/, runs/ (gitignored)
 └── models/                   # saved weights (gitignored)
@@ -75,6 +76,7 @@ uv run python -m finsent.llm_classify --limit 5                          # LLM s
 uv run python -m finsent.llm_classify --model claude-opus-5-5           # full test set → outputs/preds/opus-5-5_zeroshot-low_s0.parquet
 uv run python -m finsent.llm_classify --model claude-haiku-5-5 --flip_test 100   # sampling-noise check
 uv run python -m finsent.collection         # final benchmark table, ~1.5 min (1000 bootstrap resamples per CI/Δ; --n_boot 200 for a quick look)
+uv run python -m finsent.error_analysis     # errors by annotator agreement level + the sentences every clean model gets wrong
 ```
 
 **Claude API**: needs `ANTHROPIC_API_KEY` in `.env` — a Claude Pro subscription does **not** include API credit (separate prepaid billing in the Console). Every LLM result is cached in `outputs/llm_cache.jsonl` keyed by prompt version + model + few_shot + effort + replicate + sentence, so reruns are free and resumable. Phase 4 total spend ≈ $2.5 (Haiku runs ~$0.05 each, Opus run $2.05, flip tests $0.29).
@@ -184,6 +186,39 @@ Paired bootstrap (A − B):
 - **Caveat — contamination applies to LLMs too**: PhraseBank has been public since 2014; Opus matching the annotator convention on ambiguous sentences may partly be memorization, which larger models do more of. Not testable on PhraseBank — Phase 6 again.
 - **Phase 7 teacher: deferred to Phase 6.** Opus = best quality (≈$56 per 20k headlines), Haiku = 40× cheaper (≈$1.4) but would pass its positive-undercall bias to the student. "Best" depends on which labeling convention is wanted, and the Phase 6 gold set defines that — run both LLMs on the gold set (Opus < $1 per 300 headlines) and choose then.
 
+**Phase 5 — final table** (`collection.py`; every number above reproduces from `outputs/preds/`; Δ = paired bootstrap vs DeBERTa-50agree, * = significant):
+
+| Family | Model | Training data | test=50agree [95% CI] | clean | ambiguous | Δ vs DeBERTa |
+|---|---|---|---|---|---|---|
+| baseline | majority | — | 0.248 | 0.260 | 0.237 | −0.618* |
+| baseline | TF-IDF + LR | 3,386 | 0.750 [.712, .785] | 0.861 | 0.648 | −0.116* |
+| encoder | ModernBERT-base | 3,386 | 0.849 [.823, .872] | 0.954 | 0.761 | −0.018 |
+| encoder | **DeBERTa-v3-base** | 3,386 | **0.866** [.842, .891] | 0.952 | 0.794 | ref |
+| LLM | Haiku 5.5 zero-shot | none | 0.844 [.813, .872] | 0.963 | 0.739 | −0.023 |
+| LLM | **Opus 5.5 zero-shot** | none | **0.865** [.840, .890] | 0.953 | 0.791 | −0.001 |
+| ⚠️ contaminated | FinBERT fine-tuned / zero-shot | saw PhraseBank | 0.884 / 0.881 | 0.966 / 0.947 | 0.816 / 0.827 | +0.018 / +0.015 |
+
+**Headline result: among clean models, fine-tuned DeBERTa and zero-shot Opus tie for first; FinBERT's lead is contamination.**
+
+**Phase 5 — where the errors are** (`error_analysis.py`). Annotator agreement per test sentence comes from the highest nested PhraseBank subset containing it: 100% (347), 75–99% (171), 66–74% (112), 50–65% (96); labels agree across subsets (0 conflicts).
+
+| Error rate | 100% | 75–99% | 66–74% | 50–65% |
+|---|---|---|---|---|
+| TF-IDF | 10.4% | 25.1% | 35.7% | 37.5% |
+| ModernBERT | 3.1% | 15.0% | 31.8% | 33.7% |
+| DeBERTa | 3.1% | 12.1% | 25.6% | 29.5% |
+| Haiku | 3.2% | 13.5% | 33.0% | 39.6% |
+| Opus | 4.3% | 11.1% | 28.6% | 34.4% |
+| FinBERT-zs ⚠️ | 3.5% | 15.2% | 17.9% | 24.0% |
+| *one more human annotator vs the majority (≈ 1 − agreement, rough)* | *0%* | *~1–25%* | *~26–34%* | *~35–50%* |
+
+1. **Errors track human disagreement, monotonically, for every model.** On ambiguous strata the clean models err about as often as one more human annotator would disagree with the majority (rough reference: bins are ranges, 5–8 annotators per sentence). → The residual error there is mostly irreducible under this label set; the only stratum with clear headroom is 100% agreement, where good models are at ~3%.
+2. **Clean-sentence errors are idiosyncratic, ambiguous-sentence errors are shared.** On 100%-agreement sentences no sentence is missed by ≥3 of the 5 clean models (TF-IDF, ModernBERT, DeBERTa, Haiku, Opus; multi-seed models by majority vote). On the rest, the more ambiguous the sentence, the more models miss it together.
+3. **Hard core: 16 sentences (2.2%) wrong for all 5 clean models** — 0 at 100% agreement, 2 at 75%, 7 at 66%, 7 at 50%. In 94% of them all five give the **same** wrong label (models agree with each other, not with the majority). 12/16 are gold positive → predicted neutral — the Haiku threshold mechanism, shared here by every model.
+4. **Manual categories of the 16** (judgment, reviewed with the user): (a) **favorable language without numbers** — 8 (growth project, continued investment, product efficiency, "well-located" apartment); PhraseBank's majority read these as positive, models as no clear price impact; a convention question. (b) **procedural disclosures with a positive label** — 4 (AGM approval, securities lending agreement, board incentive plan, ten-year cooperation); the published instruction (P1–P3 in `data/gold/GUIDELINES.md`) supports neutral, so these are **likely label noise**; Opus called them neutral at confidence 0.88–0.92. (c) **perspective / missing context** — 4 (layoffs with no stated reason, a divestment the company calls strategic, a contract that helps Ericsson inside Elisa's network, a scam using Google's name).
+5. **Strongest contamination evidence so far**: on the hard core the clean models score 0% by construction, while FinBERT zero-shot gets **62%** (10/16) right — including **3 of the 4** category-(b) labels that the text does not support. FinBERT-zs also has the lowest error of any model at 50–65% agreement (24.0%), below the rough one-more-annotator reference. Recovering labels the text cannot justify points to memorization.
+6. **Consequence for Phase 6 → `data/gold/GUIDELINES.md`.** Gold labels follow Malo et al.'s published instruction verbatim (keeps the convention fixed, so a score drop measures domain shift, not a convention change), plus operational rules derived from the hard core: A1 subject company's stock; A2 procedural disclosures → neutral; **A3 option (a), chosen by the user**: a concrete favorable development → positive, generic language and the company's own evaluative claims → neutral; A4 layoffs/divestments labeled by the stated reason, else neutral; A5/A6 headline-specific (price moves, mixed signals; revisit after the pilot). Applied to the 16 hard-core sentences, these rules disagree with PhraseBank on 8 (all four category-(b) cases among them).
+
 ## 7. Known pitfalls
 
 - **FinBERT (`ProsusAI/finbert`) has two independent problems**:
@@ -215,8 +250,8 @@ Paired bootstrap (A − B):
 **Phase 4** (done): `llm_classify.py` fixed (§7) and extended with a runner and `--flip_test`; Haiku zero/few-shot, Haiku effort medium, Opus zero-shot, flip tests on both — results in §6.
 
 **Next**
-1. Phase 5: ~~one final benchmark table~~ done — `collection.py` (excludes s42 and flip-test replicates, excludes degenerate runs by default with a note, bootstrap CI of the seed-averaged score, paired Δ vs `deberta-v3-base_50agree` on test=50agree and the ambiguous half; every number matches §6). Remaining: a manual read of the sentences that **every** model gets wrong — are they label noise, or genuinely hard?
-2. Phase 6: collect 2026 headlines, hand-label a gold set, run every model on it (domain shift + contamination check for FinBERT and the LLMs), then **choose the Phase 7 teacher** (Haiku vs Opus) by agreement with the gold labels
+1. ~~Phase 5~~ done: `collection.py` (final table) and `error_analysis.py` (errors vs agreement, hard core, manual categories) — findings in §6
+2. **Phase 6** ← next: collect 2026 headlines and label them under `data/gold/GUIDELINES.md` (blind to model predictions; pilot ~50 first, then freeze the rules; record `sure`/`unsure`; relabel 50 after a week for intra-annotator agreement). Then run every model on the gold set (domain shift + contamination check for FinBERT and the LLMs) and **choose the Phase 7 teacher** (Haiku vs Opus) by agreement with the gold labels. `news.py` (headline collection) still to be written
 3. Optional: a convention-explicit prompt for Haiku, tuned on **val** only, to see if its positive-undercall bias is fixable cheaply
 
 ## 9. Companion notes
